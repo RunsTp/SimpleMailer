@@ -14,6 +14,7 @@ class SimpleMailer
     protected $server;
     protected $port;
     protected $ssl;
+    protected $startSSL;
 
     protected $username;
     protected $password;
@@ -26,8 +27,9 @@ class SimpleMailer
     public function __construct($option)
     {
         $server   = $option['server'] ?? '';
-        $port     = $option['port'] ?? 25;
         $ssl      = $option['ssl'] ?? false;
+        $startSSL = $option['startSSL'] ?? false;
+        $port     = $option['port'] ?? ($ssl ? 465 : ($startSSL ? 587 : 25));
         $username = $option['username'] ?? '';
         $password = $option['password'] ?? '';
         $mailFrom = $option['mailFrom'] ?? '';
@@ -35,6 +37,7 @@ class SimpleMailer
         $this->setServer($server);
         $this->setPort($port);
         $this->setSSL($ssl);
+        $this->setStartSSL($startSSL);
         $this->setUsername($username);
         $this->setPassword($password);
         $this->setMailFrom($mailFrom);
@@ -53,11 +56,18 @@ class SimpleMailer
     public function setSSL(bool $ssl)
     {
         $this->ssl = $ssl;
+        if ($ssl) $this->startSSL = false;
+    }
+
+    public function setStartSSL(bool $startSSL)
+    {
+        $this->startSSL = $startSSL;
+        if ($startSSL) $this->ssl = false;
     }
 
     public function setUsername(string $username)
     {
-        $this->username = $username;
+        $this->username = base64_encode($username);
     }
 
     public function setPassword(string $password)
@@ -77,25 +87,34 @@ class SimpleMailer
 
         if ($this->conn->connect($this->server, $this->port))
         {
+            $recv = $this->recv();
+            if (!$recv || strpos($recv, '220 ') === false) goto error;
+
+            $host = (explode(' ', $recv))[1];
+
             $this->conn->set([
                 'open_eof_check' => true,
                 'package_eof' => "\r\n",
                 'package_max_length' => 1024 * 1024 * 2,
             ]);
 
-            if (!$this->send('ehlo ' . $this->username))
-            {
-                $this->conn->close();
-                return false;
-            }
+            if (!$this->send('ehlo ' . $host)) goto error;
 
-            if (!$this->wait('250'))
+            if (!$this->wait('250')) goto error;
+
+            if ($this->startSSL)
             {
-                $this->conn->close();
-                return false;
+                if (!$this->send('starttls')) goto error;
+                if (!$this->wait('220')) goto error;
+                $this->conn->enableSSL();
+                if (!$this->send('ehlo ' . $host)) goto error;
+                if (!$this->wait('250')) goto error;
             }
 
             return true;
+            error:
+            $this->conn->close();
+            return false;
         }
 
         return false;
@@ -131,14 +150,16 @@ class SimpleMailer
         $this->sending = true;
         $result = false;
 
-        do {
+        do
+        {
             if (!$this->connect()) break;
 
             // auth
-            if ($this->username != '' && $this->password != '') {
+            if ($this->username != '' && $this->password != '')
+            {
                 if (!$this->send('auth login')) break;
                 if (!$this->wait('334')) break;
-                if (!$this->send(base64_encode($this->username))) break;
+                if (!$this->send($this->username)) break;
                 if (!$this->wait('334')) break;
                 if (!$this->send($this->password)) break;
                 if (!$this->wait('235')) break;
